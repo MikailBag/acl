@@ -49,7 +49,6 @@ pub struct Prefix {
     items: HashMap<String, Item>,
 }
 
-
 impl Default for Prefix {
     fn default() -> Prefix {
         Prefix::new()
