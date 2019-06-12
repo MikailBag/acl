@@ -1,4 +1,4 @@
-use std::{collections::HashMap};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub enum Effect {
@@ -45,7 +45,7 @@ pub struct AccessToken<'a> {
 
 #[derive(Debug, Clone)]
 pub struct Prefix {
-    self_security: Option<SecurityDescriptor>,
+    self_security: SecurityDescriptor,
     items: HashMap<String, Item>,
 }
 
@@ -67,31 +67,37 @@ impl SecurityDescriptor {
     }
 }
 
+impl Default for Prefix {
+    fn default() -> Prefix {
+        Prefix::new()
+    }
+}
+
 impl Prefix {
     pub fn new() -> Prefix {
         Prefix {
-            self_security: None,
+            self_security: SecurityDescriptor::new(),
             items: HashMap::new(),
         }
     }
 
     pub fn with_security(sec: SecurityDescriptor) -> Prefix {
         Prefix {
-            self_security: Some(sec),
+            self_security: sec,
             items: HashMap::new(),
         }
     }
 
     pub fn set_self_security(&mut self, sec: SecurityDescriptor) {
-        self.self_security.replace(sec);
+        std::mem::replace(&mut self.self_security, sec);
     }
 
     pub fn add_item(&mut self, name: &str, item: Item) {
         self.items.insert(name.to_string(), item.clone());
     }
 
-    fn self_security(&self) -> Option<&SecurityDescriptor> {
-        self.self_security.as_ref()
+    fn self_security(&self) -> &SecurityDescriptor {
+        &self.self_security
     }
 
     fn get_item(&self, item_name: &str) -> Option<&Item> {
@@ -102,13 +108,12 @@ impl Prefix {
 impl RuleSubject {
     fn covers(&self, token: AccessToken) -> bool {
         match self {
-            RuleSubject::User(ref login) => &token.name == login,
+            RuleSubject::User(ref login) => token.name == login,
             RuleSubject::Group(ref group) => token.groups.contains(&group.as_str()),
             RuleSubject::Everyone => true,
         }
     }
 }
-
 
 /// Security descriptor lookup result
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -123,6 +128,12 @@ pub enum CheckResult {
     NotFound,
 }
 
+impl Default for SecurityDescriptor {
+    fn default() -> SecurityDescriptor {
+        SecurityDescriptor::new()
+    }
+}
+
 impl SecurityDescriptor {
     pub fn new() -> SecurityDescriptor {
         SecurityDescriptor { acl: Vec::new() }
@@ -135,7 +146,7 @@ impl SecurityDescriptor {
     fn update_access(cur: &mut u64, next: Option<u64>) {
         use std::u64;
         let next = next.unwrap_or(u64::max_value());
-        *cur = *cur & next;
+        *cur &= next;
     }
 
     fn check(&self, token: AccessToken, requested_access: u64) -> CheckResult {
@@ -203,8 +214,10 @@ pub fn access<'a>(
             ItemRef::Prefix(pref) => pref,
             ItemRef::Object(_obj) => return CheckResult::NotFound,
         };
-        if let Some(sec) = cur_prefix.self_security() {
-            let check_res = sec.check(token, cur_access);
+        //if let sec = cur_prefix.self_security() {
+
+        {
+            let check_res = cur_prefix.self_security().check(token, cur_access);
             match check_res {
                 CheckResult::Allow(acc) => {
                     cur_access &= acc;
@@ -216,6 +229,7 @@ pub fn access<'a>(
                 CheckResult::NoMatch => return CheckResult::NoMatch,
             }
         }
+        // }
         match cur_prefix.get_item(SPECIAL_SEGMENT_SUDO) {
             None => {}
             Some(item) => {
@@ -273,9 +287,7 @@ mod tests {
 
             object.add_entry(entry);
         }
-        let object = Object {
-            security: object
-        };
+        let object = Object { security: object };
         root.add_item("top-secret", Item::Object(object));
 
         let joe_admin = AccessToken {
@@ -307,7 +319,7 @@ mod tests {
     fn access_crop() {
         let root_security = SecurityDescriptor::with_capped_access(5);
         let mut root = Prefix::with_security(root_security);
-        root.self_security.as_mut().unwrap().add_entry(Entry {
+        root.self_security.add_entry(Entry {
             subject: RuleSubject::Everyone,
             effect: Effect::Allow(None),
         });
@@ -328,9 +340,7 @@ mod tests {
 
             object.add_entry(entry);
         }
-        let object = Object {
-            security: object
-        };
+        let object = Object { security: object };
         root.add_item("top-secret", Item::Object(object));
 
         let joe_admin = AccessToken {
@@ -355,27 +365,26 @@ mod tests {
         let mut root = Prefix::new();
 
         let sudo_object_security = SecurityDescriptor {
-            acl: vec![
-                Entry {
-                    subject: RuleSubject::User("jon_snow".to_string()),
-                    effect: Effect::Allow(Some(0)),
-                }
-            ]
+            acl: vec![Entry {
+                subject: RuleSubject::User("jon_snow".to_string()),
+                effect: Effect::Allow(Some(0)),
+            }],
         };
-        root.add_item(SPECIAL_SEGMENT_SUDO, Item::Object(
-            Object {
-                security: sudo_object_security
-            }
-        ));
+        root.add_item(
+            SPECIAL_SEGMENT_SUDO,
+            Item::Object(Object {
+                security: sudo_object_security,
+            }),
+        );
 
         let got_final_security = SecurityDescriptor::deny_all();
 
-        root.add_item("GotFinal", Item::Object(
-            Object {
+        root.add_item(
+            "GotFinal",
+            Item::Object(Object {
                 security: got_final_security,
-            }
-        ));
-
+            }),
+        );
 
         let path = &["GotFinal"];
 
