@@ -49,23 +49,6 @@ pub struct Prefix {
     items: HashMap<String, Item>,
 }
 
-impl SecurityDescriptor {
-    pub fn with_capped_access(max_access: u64) -> SecurityDescriptor {
-        let acl = vec![Entry {
-            subject: RuleSubject::Everyone,
-            effect: Effect::Allow(Some(max_access)),
-        }];
-        SecurityDescriptor { acl }
-    }
-
-    pub fn deny_all() -> SecurityDescriptor {
-        let acl = vec![Entry {
-            subject: RuleSubject::Everyone,
-            effect: Effect::Deny,
-        }];
-        SecurityDescriptor { acl }
-    }
-}
 
 impl Default for Prefix {
     fn default() -> Prefix {
@@ -76,7 +59,7 @@ impl Default for Prefix {
 impl Prefix {
     pub fn new() -> Prefix {
         Prefix {
-            self_security: SecurityDescriptor::new(),
+            self_security: SecurityDescriptor::allow_all(),
             items: HashMap::new(),
         }
     }
@@ -130,12 +113,37 @@ pub enum CheckResult {
 
 impl Default for SecurityDescriptor {
     fn default() -> SecurityDescriptor {
-        SecurityDescriptor::new()
+        SecurityDescriptor::allow_all()
     }
 }
 
 impl SecurityDescriptor {
-    pub fn new() -> SecurityDescriptor {
+    pub fn with_capped_access(max_access: u64) -> SecurityDescriptor {
+        let acl = vec![Entry {
+            subject: RuleSubject::Everyone,
+            effect: Effect::Allow(Some(max_access)),
+        }];
+        SecurityDescriptor { acl }
+    }
+
+    pub fn deny_all() -> SecurityDescriptor {
+        let acl = vec![Entry {
+            subject: RuleSubject::Everyone,
+            effect: Effect::Deny,
+        }];
+        SecurityDescriptor { acl }
+    }
+
+    pub fn allow_all() -> SecurityDescriptor {
+        let acl = vec![Entry {
+            subject: RuleSubject::Everyone,
+            effect: Effect::Allow(None),
+        }];
+
+        SecurityDescriptor { acl }
+    }
+
+    pub fn empty() -> SecurityDescriptor {
         SecurityDescriptor { acl: Vec::new() }
     }
 
@@ -214,8 +222,6 @@ pub fn access<'a>(
             ItemRef::Prefix(pref) => pref,
             ItemRef::Object(_obj) => return CheckResult::NotFound,
         };
-        //if let sec = cur_prefix.self_security() {
-
         {
             let check_res = cur_prefix.self_security().check(token, cur_access);
             match check_res {
@@ -270,7 +276,7 @@ mod tests {
     #[test]
     fn simple() {
         let mut root = Prefix::new();
-        let mut object = SecurityDescriptor::new();
+        let mut object = SecurityDescriptor::empty();
         {
             let entry = Entry {
                 subject: RuleSubject::Group("admin".into()),
@@ -303,16 +309,9 @@ mod tests {
         let path = &["top-secret"];
 
         let joe_access = access(&root, joe_admin, path, 0);
-        match joe_access {
-            CheckResult::Allow(_) => (),
-            _ => panic!("test failed"),
-        }
-
+        assert_eq!(joe_access, CheckResult::Allow(0));
         let bob_access = access(&root, bob_hacker, path, 0);
-        match bob_access {
-            CheckResult::Deny => (),
-            _ => panic!("test failed"),
-        }
+        assert_eq!(bob_access, CheckResult::Deny);
     }
 
     #[test]
@@ -323,7 +322,7 @@ mod tests {
             subject: RuleSubject::Everyone,
             effect: Effect::Allow(None),
         });
-        let mut object = SecurityDescriptor::new();
+        let mut object = SecurityDescriptor::empty();
         {
             let entry = Entry {
                 subject: RuleSubject::Group("admin".to_string()),
@@ -351,10 +350,7 @@ mod tests {
         let path = &["top-secret"];
 
         let joe_access = access(&root, joe_admin, path, 255);
-        match joe_access {
-            CheckResult::Allow(4) => (),
-            _ => panic!("test failed"),
-        }
+        assert_eq!(joe_access, CheckResult::Allow(4));
     }
 
     #[test]
