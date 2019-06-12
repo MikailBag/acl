@@ -1,130 +1,159 @@
-use std::{collections::HashMap, fmt::Debug, ops};
-
-pub trait AccessMask: Debug + Clone + ops::BitAnd<Self, Output = Self> {}
+use std::{collections::HashMap};
 
 #[derive(Debug, Clone)]
-pub enum Effect<A: AccessMask> {
-    Allow(Option<A>),
+pub enum Effect {
+    Allow(Option<u64>),
     Deny,
-    Next(Option<A>),
+    Next(Option<u64>),
 }
 
 #[derive(Debug, Clone)]
-pub enum Subject {
+pub enum RuleSubject {
     User(String),
-    Group(Vec<String>),
+    Group(String),
     Everyone,
 }
 
 #[derive(Debug, Clone)]
-pub struct Entry<A: AccessMask> {
-    pub subject: Subject,
-    pub effect: Effect<A>,
+pub struct Entry {
+    pub subject: RuleSubject,
+    pub effect: Effect,
 }
 
 #[derive(Debug, Clone)]
-pub struct SecurityDescriptor<A: AccessMask> {
-    pub acl: Vec<Entry<A>>,
+pub struct SecurityDescriptor {
+    pub acl: Vec<Entry>,
 }
 
 #[derive(Debug, Clone)]
-pub enum Item<A: AccessMask> {
-    Object(SecurityDescriptor<A>),
-    Prefix(Prefix<A>),
+pub struct Object {
+    pub security: SecurityDescriptor,
 }
 
 #[derive(Debug, Clone)]
-pub struct Prefix<A: AccessMask> {
-    pub self_security: Option<SecurityDescriptor<A>>,
-    pub items: HashMap<String, Item<A>>,
+pub enum Item {
+    Object(Object),
+    Prefix(Prefix),
 }
 
-impl<A: AccessMask> Prefix<A> {
-    pub fn new() -> Prefix<A> {
-        Prefix{
+/// Represents security subject - e.g. user, process, etc
+#[derive(Debug, Clone, Copy)]
+pub struct AccessToken<'a> {
+    name: &'a str,
+    groups: &'a [&'a str],
+}
+
+#[derive(Debug, Clone)]
+pub struct Prefix {
+    self_security: Option<SecurityDescriptor>,
+    items: HashMap<String, Item>,
+}
+
+impl SecurityDescriptor {
+    pub fn with_capped_access(max_access: u64) -> SecurityDescriptor {
+        let acl = vec![Entry {
+            subject: RuleSubject::Everyone,
+            effect: Effect::Allow(Some(max_access)),
+        }];
+        SecurityDescriptor { acl }
+    }
+
+    pub fn deny_all() -> SecurityDescriptor {
+        let acl = vec![Entry {
+            subject: RuleSubject::Everyone,
+            effect: Effect::Deny,
+        }];
+        SecurityDescriptor { acl }
+    }
+}
+
+impl Prefix {
+    pub fn new() -> Prefix {
+        Prefix {
             self_security: None,
             items: HashMap::new(),
         }
     }
 
-    pub fn new_with_access(access: A) -> Prefix<A> {
-        let entry = Entry {
-            subject: Subject::Everyone,
-            effect: Effect::Next(Some(access))
-        };
-
-        let sec=SecurityDescriptor{
-            acl: vec![entry]
-        };
+    pub fn with_security(sec: SecurityDescriptor) -> Prefix {
         Prefix {
             self_security: Some(sec),
             items: HashMap::new(),
         }
     }
 
-    pub fn add_item(&mut self, name: &str, item: &Item<A>) {
+    pub fn set_self_security(&mut self, sec: SecurityDescriptor) {
+        self.self_security.replace(sec);
+    }
+
+    pub fn add_item(&mut self, name: &str, item: Item) {
         self.items.insert(name.to_string(), item.clone());
+    }
+
+    fn self_security(&self) -> Option<&SecurityDescriptor> {
+        self.self_security.as_ref()
+    }
+
+    fn get_item(&self, item_name: &str) -> Option<&Item> {
+        self.items.get(item_name)
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct User {
-    name: String,
-    groups: Vec<String>,
-}
-
-impl Subject {
-    fn covers(&self, user: &User) -> bool {
+impl RuleSubject {
+    fn covers(&self, token: AccessToken) -> bool {
         match self {
-            Subject::User(ref login) => &user.name == login,
-            Subject::Group(ref groups) => groups.iter().all(|gr| user.groups.contains(gr)),
-            Subject::Everyone => true,
+            RuleSubject::User(ref login) => &token.name == login,
+            RuleSubject::Group(ref group) => token.groups.contains(&group.as_str()),
+            RuleSubject::Everyone => true,
         }
     }
 }
 
-pub enum CheckResult<A: AccessMask> {
-    Allow(A),
+
+/// Security descriptor lookup result
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum CheckResult {
+    /// Access to object is allowed. Associated u64 means, what rights are additionally granted
+    Allow(u64),
+    /// Access is denied
     Deny,
+    /// No rule in ACL (neither allow nor deny) refers to subject
     NoMatch,
+    /// Object not found, or path refers to prefix
     NotFound,
 }
 
-impl<A: AccessMask> SecurityDescriptor<A> {
-    pub fn new() -> SecurityDescriptor<A> {
+impl SecurityDescriptor {
+    pub fn new() -> SecurityDescriptor {
         SecurityDescriptor { acl: Vec::new() }
     }
 
-    pub fn add_entry(&mut self, entry: Entry<A>) {
+    pub fn add_entry(&mut self, entry: Entry) {
         self.acl.push(entry)
     }
 
-    fn update_access(cur: &mut A, next: &Option<A>) {
-        match next {
-            None => (),
-            Some(ref next) => {
-                let ncur: A = cur.clone().bitand(next.clone());
-                std::mem::replace(cur, ncur);
-            }
-        }
+    fn update_access(cur: &mut u64, next: Option<u64>) {
+        use std::u64;
+        let next = next.unwrap_or(u64::max_value());
+        *cur = *cur & next;
     }
 
-    fn check(&self, user: &User, requested_access: A) -> CheckResult<A> {
+    fn check(&self, token: AccessToken, requested_access: u64) -> CheckResult {
         let mut provided_access = requested_access;
         for entry in &self.acl {
-            if !entry.subject.covers(user) {
+            if !entry.subject.covers(token) {
                 continue;
             }
             match &entry.effect {
                 Effect::Allow(next) => {
-                    Self::update_access(&mut provided_access, next);
+                    Self::update_access(&mut provided_access, *next);
                     return CheckResult::Allow(provided_access);
                 }
                 Effect::Deny => {
                     return CheckResult::Deny;
                 }
                 Effect::Next(next) => {
-                    Self::update_access(&mut provided_access, next);
+                    Self::update_access(&mut provided_access, *next);
                 }
             }
         }
@@ -132,29 +161,53 @@ impl<A: AccessMask> SecurityDescriptor<A> {
     }
 }
 
-enum ItemRef<'a, A: AccessMask> {
-    PrefixRef(&'a Prefix<A>),
-    ObjectRef(&'a SecurityDescriptor<A>),
+#[derive(Copy, Clone)]
+enum ItemRef<'a> {
+    Prefix(&'a Prefix),
+    Object(&'a Object),
 }
 
-pub fn access<'dfl, A: AccessMask>(
-    root: &'dfl Prefix<A>,
-    user: &'dfl User,
-    path: &'dfl[&'dfl str],
-    requested_access: A,
-) -> CheckResult<A> {
-    let mut cur_item = ItemRef::PrefixRef(root);
+impl<'a> ItemRef<'a> {
+    fn as_object(self) -> Option<&'a Object> {
+        match self {
+            ItemRef::Prefix(_) => None,
+            ItemRef::Object(obj) => Some(obj),
+        }
+    }
+}
+
+impl<'a> From<&'a Item> for ItemRef<'a> {
+    fn from(it: &'a Item) -> ItemRef<'a> {
+        match it {
+            Item::Prefix(p) => ItemRef::Prefix(p),
+            Item::Object(p) => ItemRef::Object(p),
+        }
+    }
+}
+
+/// If such an object exists in some prefix, and user has access to this object,
+/// then this user has full access to prefix content
+/// Access flags are ignored
+pub const SPECIAL_SEGMENT_SUDO: &str = "$ACL.Sudo";
+
+pub fn access<'a>(
+    root: &Prefix,
+    token: AccessToken,
+    path: &'a [&'a str],
+    requested_access: u64,
+) -> CheckResult {
+    let mut cur_item = ItemRef::Prefix(root);
     let mut cur_access = requested_access;
     for &segment in path {
         let cur_prefix = match cur_item {
-            ItemRef::PrefixRef(pref) => pref,
-            ItemRef::ObjectRef(_obj) => return CheckResult::NotFound,
+            ItemRef::Prefix(pref) => pref,
+            ItemRef::Object(_obj) => return CheckResult::NotFound,
         };
-        if let Some(sec) = &cur_prefix.self_security {
-            let check_res = sec.check(user, cur_access.clone());
+        if let Some(sec) = cur_prefix.self_security() {
+            let check_res = sec.check(token, cur_access);
             match check_res {
                 CheckResult::Allow(acc) => {
-                    cur_access = cur_access.bitand(acc);
+                    cur_access &= acc;
                 }
                 CheckResult::Deny => {
                     return CheckResult::Deny;
@@ -163,135 +216,183 @@ pub fn access<'dfl, A: AccessMask>(
                 CheckResult::NoMatch => return CheckResult::NoMatch,
             }
         }
-        match cur_prefix.items.get(segment) {
+        match cur_prefix.get_item(SPECIAL_SEGMENT_SUDO) {
+            None => {}
+            Some(item) => {
+                let item: ItemRef = item.into();
+                let obj = item.as_object().unwrap();
+
+                let check_res = obj.security.check(token, 0);
+                if let CheckResult::Allow(_) = check_res {
+                    // no more lookup
+                    // sudo granted
+                    return CheckResult::Allow(cur_access);
+                }
+            }
+        };
+        match cur_prefix.get_item(segment) {
             None => {
                 return CheckResult::NotFound;
             }
             Some(item) => {
                 cur_item = match item {
-                    Item::Prefix(ref pref) => ItemRef::PrefixRef(pref),
-                    Item::Object(ref obj) => ItemRef::ObjectRef(obj),
+                    Item::Prefix(pref) => ItemRef::Prefix(pref),
+                    Item::Object(obj) => ItemRef::Object(obj),
                 };
             }
         }
     }
-    let obj_sec = match cur_item {
-        ItemRef::PrefixRef(_p) => return CheckResult::NotFound,
-        ItemRef::ObjectRef( obj) => obj.clone()
+    let obj = match cur_item {
+        ItemRef::Prefix(_p) => return CheckResult::NotFound,
+        ItemRef::Object(obj) => obj,
     };
-    obj_sec.check(user, cur_access)
+    obj.security.check(token, cur_access)
 }
-
-/// Useful when you don't want any access right tracking to be done
-#[derive(Debug, Clone)]
-pub struct AccessNoop;
-
-impl ops::BitAnd for AccessNoop {
-    type Output = Self;
-
-    fn bitand(self, _other: Self) -> Self {
-        Self
-    }
-}
-
-impl AccessMask for AccessNoop {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn simple() {
-        let mut root = Prefix::new_with_access(AccessNoop);
-        root.self_security.as_mut().unwrap().add_entry(Entry{
-           subject: Subject::Everyone,
-            effect:Effect::Allow(None),
-        });
+        let mut root = Prefix::new();
         let mut object = SecurityDescriptor::new();
         {
             let entry = Entry {
-                subject: Subject::Group(vec!["admin".into()]),
-                effect: Effect::Allow(None)
+                subject: RuleSubject::Group("admin".into()),
+                effect: Effect::Allow(None),
             };
 
             object.add_entry(entry);
         }
         {
             let entry = Entry {
-                subject: Subject::Everyone,
-                effect: Effect::Deny
+                subject: RuleSubject::Everyone,
+                effect: Effect::Deny,
             };
 
             object.add_entry(entry);
         }
-            root.add_item("top-secret", &Item::Object(object));
+        let object = Object {
+            security: object
+        };
+        root.add_item("top-secret", Item::Object(object));
 
-        let joe_admin = User {
-            name: "joe".to_string(),
-            groups: vec!["admin".to_string(), "jojo-fan".to_string()]
+        let joe_admin = AccessToken {
+            name: "joe",
+            groups: &["admin", "jojo-fan"],
         };
 
-        let bob_hacker =  User {
-            name: "bob".to_string(),
-            groups: vec!["jojo-fan".to_string()]
+        let bob_hacker = AccessToken {
+            name: "bob",
+            groups: &["jojo-fan"],
         };
 
         let path = &["top-secret"];
 
-        let joe_access = access(&root, &joe_admin, path, AccessNoop);
-        //assert_eq!(joe_access, Some(AccessNoop));
+        let joe_access = access(&root, joe_admin, path, 0);
         match joe_access {
-            CheckResult::Allow(AccessNoop) => (),
+            CheckResult::Allow(_) => (),
             _ => panic!("test failed"),
         }
 
-        let bob_access = access(&root, &bob_hacker, path, AccessNoop);
+        let bob_access = access(&root, bob_hacker, path, 0);
         match bob_access {
             CheckResult::Deny => (),
             _ => panic!("test failed"),
         }
-        //assert_eq!(bob_access, None);
     }
-
-    impl AccessMask for u64 {}
 
     #[test]
     fn access_crop() {
-        let mut root = Prefix::new_with_access(5);
-        root.self_security.as_mut().unwrap().add_entry(Entry{
-            subject: Subject::Everyone,
-            effect:Effect::Allow(None),
+        let root_security = SecurityDescriptor::with_capped_access(5);
+        let mut root = Prefix::with_security(root_security);
+        root.self_security.as_mut().unwrap().add_entry(Entry {
+            subject: RuleSubject::Everyone,
+            effect: Effect::Allow(None),
         });
         let mut object = SecurityDescriptor::new();
         {
             let entry = Entry {
-                subject: Subject::Group(vec!["admin".into()]),
-                effect: Effect::Allow(Some(6))
+                subject: RuleSubject::Group("admin".to_string()),
+                effect: Effect::Allow(Some(6)),
             };
 
             object.add_entry(entry);
         }
         {
             let entry = Entry {
-                subject: Subject::Everyone,
-                effect: Effect::Deny
+                subject: RuleSubject::Everyone,
+                effect: Effect::Deny,
             };
 
             object.add_entry(entry);
         }
-        root.add_item("top-secret", &Item::Object(object));
+        let object = Object {
+            security: object
+        };
+        root.add_item("top-secret", Item::Object(object));
 
-        let joe_admin = User {
-            name: "joe".to_string(),
-            groups: vec!["admin".to_string(), "jojo-fan".to_string()]
+        let joe_admin = AccessToken {
+            name: "joe",
+            groups: &["admin", "jojo-fan"],
         };
 
         let path = &["top-secret"];
 
-        let joe_access = access(&root, &joe_admin, path, 255);
-        //assert_eq!(joe_access, Some(AccessNoop));
+        let joe_access = access(&root, joe_admin, path, 255);
         match joe_access {
             CheckResult::Allow(4) => (),
             _ => panic!("test failed"),
         }
+    }
+
+    #[test]
+    fn sudo_mode() {
+        // root: no filter
+        // root/$ACL.Sudo: allow for jon_snow
+        // root/GotFinal: deny for all
+        let mut root = Prefix::new();
+
+        let sudo_object_security = SecurityDescriptor {
+            acl: vec![
+                Entry {
+                    subject: RuleSubject::User("jon_snow".to_string()),
+                    effect: Effect::Allow(Some(0)),
+                }
+            ]
+        };
+        root.add_item(SPECIAL_SEGMENT_SUDO, Item::Object(
+            Object {
+                security: sudo_object_security
+            }
+        ));
+
+        let got_final_security = SecurityDescriptor::deny_all();
+
+        root.add_item("GotFinal", Item::Object(
+            Object {
+                security: got_final_security,
+            }
+        ));
+
+
+        let path = &["GotFinal"];
+
+        let jon_snow = AccessToken {
+            name: "jon_snow",
+            groups: &[],
+        };
+
+        let cersei = AccessToken {
+            name: "cersei",
+            groups: &[],
+        };
+
+        let jon_access = access(&root, jon_snow, path, 179);
+        assert_eq!(jon_access, CheckResult::Allow(179));
+
+        let cersei_access = access(&root, cersei, path, 179);
+        assert_eq!(cersei_access, CheckResult::Deny);
     }
 }
