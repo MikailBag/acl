@@ -39,8 +39,8 @@ pub enum Item {
 /// Represents security subject - e.g. user, process, etc
 #[derive(Debug, Clone, Copy)]
 pub struct AccessToken<'a> {
-    name: &'a str,
-    groups: &'a [String],
+    pub name: &'a str,
+    pub groups: &'a [String],
 }
 
 #[derive(Debug, Clone)]
