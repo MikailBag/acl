@@ -40,7 +40,7 @@ pub enum Item {
 #[derive(Debug, Clone, Copy)]
 pub struct AccessToken<'a> {
     name: &'a str,
-    groups: &'a [&'a str],
+    groups: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ impl RuleSubject {
     fn covers(&self, token: AccessToken) -> bool {
         match self {
             RuleSubject::User(ref login) => token.name == login,
-            RuleSubject::Group(ref group) => token.groups.contains(&group.as_str()),
+            RuleSubject::Group(ref group) => token.groups.contains(&group),
             RuleSubject::Everyone => true,
         }
     }
@@ -272,13 +272,18 @@ pub fn access<'a>(
 mod tests {
     use super::*;
 
+    macro_rules! s {
+        ($x: tt) => {
+            $x.to_string()
+        };
+    }
     #[test]
     fn simple() {
         let mut root = Prefix::new();
         let mut object = SecurityDescriptor::empty();
         {
             let entry = Entry {
-                subject: RuleSubject::Group("admin".into()),
+                subject: RuleSubject::Group(s!("admin")),
                 effect: Effect::Allow(None),
             };
 
@@ -297,12 +302,12 @@ mod tests {
 
         let joe_admin = AccessToken {
             name: "joe",
-            groups: &["admin", "jojo-fan"],
+            groups: &[s!("admin"), s!("jojo-fan")],
         };
 
         let bob_hacker = AccessToken {
             name: "bob",
-            groups: &["jojo-fan"],
+            groups: &[s!("jojo-fan")],
         };
 
         let path = &["top-secret"];
@@ -343,7 +348,7 @@ mod tests {
 
         let joe_admin = AccessToken {
             name: "joe",
-            groups: &["admin", "jojo-fan"],
+            groups: &[s!("admin"), s!("jojo-fan")],
         };
 
         let path = &["top-secret"];
