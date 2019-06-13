@@ -110,6 +110,19 @@ pub enum CheckResult {
     NotFound,
 }
 
+impl CheckResult {
+    pub fn is_ok(self) -> bool {
+        self.ok().is_some()
+    }
+
+    pub fn ok(self) -> Option<u64> {
+        match self {
+            CheckResult::Allow(flags) => Some(flags),
+            _ => None,
+        }
+    }
+}
+
 impl Default for SecurityDescriptor {
     fn default() -> SecurityDescriptor {
         SecurityDescriptor::allow_all()
@@ -403,5 +416,25 @@ mod tests {
 
         let cersei_access = access(&root, cersei, path, 179);
         assert_eq!(cersei_access, CheckResult::Deny);
+    }
+
+    #[test]
+    fn check_result_is_ok() {
+        use super::CheckResult::*;
+        assert!(Allow(4).is_ok());
+        assert!(Allow(0).is_ok());
+        assert!(!Deny.is_ok());
+        assert!(!NoMatch.is_ok());
+        assert!(!NotFound.is_ok());
+    }
+
+    #[test]
+    fn check_result_ok() {
+        use super::CheckResult::*;
+        assert_eq!(Allow(26).ok(), Some(26));
+        assert_eq!(Allow(0).ok(), Some(0));
+        assert_eq!(Deny.ok(), None);
+        assert_eq!(NoMatch.ok(), None);
+        assert_eq!(NotFound.ok(), None);
     }
 }
